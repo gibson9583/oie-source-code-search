@@ -1,0 +1,70 @@
+# Builds the plugin on every push/PR so breakage is caught early.
+#
+# The plugin compiles against OIE 4.6.0 engine jars, which the public repsy mirror
+# does not yet carry. CI downloads a published OIE distribution and installs the four
+# jars into the local Maven repo (the same set scripts/install-engine-jars.sh installs
+# from a local engine checkout).
+
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  OIE_TAG: v4.6.0-rc1
+  OIE_TARBALL: oie_unix_4_6_0-rc1.tar.gz
+  MC_VERSION: '4.6.0'   # version to install the engine jars under (matches the pom's mc.version)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Cache OIE distribution
+        id: oie-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OIE_TARBALL }}
+          key: oie-dist-${{ env.OIE_TAG }}
+
+      - name: Download OIE distribution
+        if: steps.oie-cache.outputs.cache-hit != 'true'
+        run: curl -fSL -o "$OIE_TARBALL" "https://github.com/OpenIntegrationEngine/engine/releases/download/${OIE_TAG}/${OIE_TARBALL}"
+
+      - name: Install engine jars into the local Maven repo
+        run: |
+          tar xzf "$OIE_TARBALL" \
+            oie/server-lib/mirth-server.jar \
+            oie/server-lib/mirth-client-core.jar \
+            oie/client-lib/mirth-client.jar \
+            oie/server-lib/donkey/donkey-server.jar
+          for pair in \
+            "mirth-server:oie/server-lib/mirth-server.jar" \
+            "mirth-client-core:oie/server-lib/mirth-client-core.jar" \
+            "mirth-client:oie/client-lib/mirth-client.jar" \
+            "donkey-server:oie/server-lib/donkey/donkey-server.jar"; do
+            a="${pair%%:*}"; p="${pair#*:}"
+            mvn -q install:install-file -Dfile="$p" -DgroupId=com.mirth.connect -DartifactId="$a" -Dversion="$MC_VERSION" -Dpackaging=jar
+          done
+
+      # Compiles all modules and builds the web frontend (frontend-maven-plugin),
+      # assembling package/target/oie-source-code-search-<version>.zip.
+      - name: Build
+        run: mvn -B -ntp -DskipTests package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oie-source-code-search-extension
+          path: package/target/oie-source-code-search-*.zip
+          if-no-files-found: error
